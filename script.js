@@ -31,6 +31,8 @@ const clip         = $('clip');
 const handle       = $('handle');
 const newBtn       = $('newBtn');
 const downloadBtn  = $('downloadBtn');
+const shareBtn     = $('shareBtn');
+const presetsEl    = $('presets');
 const yearEl       = $('year');
 const topLink      = $('topLink');
 const resInfo      = $('resInfo');
@@ -43,6 +45,59 @@ let progressTimer = null;
 let aiUpscaler = null;
 let aiLoadPromise = null;
 let aiTriedAndFailed = false;
+let currentPreset = 'natural';
+
+// ===== Filter presets =====
+// Each preset configures the post-upscale grading pass.
+// `clarity` drives the local-contrast / pop. `grade` drives tone & color.
+const PRESETS = {
+  natural: {
+    clarity: { amount: 0.55, radius: 14 },
+    grade: {
+      contrast: 1.18, vibrance: 0.45, shadowLift: 14,
+      warmR: 1.025, warmB: 0.985, highlightP: 0.94,
+    },
+  },
+  vibrante: {
+    clarity: { amount: 0.78, radius: 14 },
+    grade: {
+      contrast: 1.26, vibrance: 0.85, shadowLift: 18,
+      warmR: 1.04, warmB: 0.97, highlightP: 0.92,
+    },
+  },
+  retrato: {
+    clarity: { amount: 0.32, radius: 16 },
+    grade: {
+      contrast: 1.10, vibrance: 0.30, shadowLift: 22,
+      warmR: 1.035, warmB: 0.98, highlightP: 0.95,
+      skinProtect: 0.25,
+    },
+  },
+  cine: {
+    clarity: { amount: 0.68, radius: 16 },
+    grade: {
+      contrast: 1.22, vibrance: 0.55, shadowLift: 10,
+      warmR: 1.07, warmB: 0.90, highlightP: 0.90,
+      tealOrange: true,
+    },
+  },
+  vintage: {
+    clarity: { amount: 0.38, radius: 14 },
+    grade: {
+      contrast: 1.08, vibrance: 0.22, shadowLift: 24,
+      warmR: 1.10, warmB: 0.86, highlightP: 0.90,
+      fade: 0.18,
+    },
+  },
+  bw: {
+    clarity: { amount: 0.70, radius: 14 },
+    grade: {
+      contrast: 1.32, vibrance: 0, shadowLift: 16,
+      warmR: 1, warmB: 1, highlightP: 0.92,
+      grayscale: true,
+    },
+  },
+};
 
 yearEl.textContent = new Date().getFullYear();
 
@@ -310,51 +365,79 @@ function applyLocalContrast(canvas, amount = 0.55, radius = 14) {
   ctx.putImageData(orig, 0, 0);
 }
 
-// Tonal + color grading pass: contrast, vibrance (skin-aware saturation),
-// shadow lift, warm white-balance shift. Inspired by phone-camera ISPs.
-function applyTonalBoost(canvas) {
+// Tonal + color grading pass driven by a preset config.
+// Supports: contrast, vibrance, shadow lift, warm/cool WB, highlight roll-off,
+// grayscale, fade (vintage cream mix), teal-orange split-tone.
+function applyTonalBoost(canvas, grade) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = img.data;
 
-  const contrast   = 1.18;   // +18%
-  const vibrance   = 0.45;   // 0–1, boosts unsaturated pixels more
-  const shadowLift = 14;     // up to +14 on the darkest pixels
-  const highlightP = 0.94;   // soft roll-off above 235
-  const warmR      = 1.025;  // +2.5% red
-  const warmB      = 0.985;  // -1.5% blue
+  const {
+    contrast = 1.18, vibrance = 0.45, shadowLift = 14,
+    warmR = 1.025, warmB = 0.985, highlightP = 0.94,
+    skinProtect = 0.5, grayscale = false, fade = 0,
+    tealOrange = false,
+  } = grade;
+
+  // Vintage cream tint target (R, G, B)
+  const fadeR = 230, fadeG = 210, fadeB = 175;
 
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
 
-    // Shadow lift on dark pixels
-    const lum = 0.2989 * r + 0.5870 * g + 0.1140 * b;
-    if (lum < 100) {
-      const lift = (1 - lum / 100) * shadowLift;
+    // 1. Shadow lift
+    const lum0 = 0.2989 * r + 0.5870 * g + 0.1140 * b;
+    if (lum0 < 100) {
+      const lift = (1 - lum0 / 100) * shadowLift;
       r += lift; g += lift; b += lift;
     }
 
-    // Warm white-balance shift (Apple-ish)
+    // 2. White-balance / warmth
     r *= warmR;
     b *= warmB;
 
-    // Contrast around 128
+    // 3. Teal-orange split: push shadows toward teal, highlights toward orange
+    if (tealOrange) {
+      const norm = lum0 / 255;
+      // shadows: +blue/green, -red ; highlights: +red, -blue
+      r += (norm - 0.5) * 18;
+      g += (0.5 - Math.abs(norm - 0.5)) * 6;
+      b -= (norm - 0.5) * 18;
+    }
+
+    // 4. Contrast
     r = (r - 128) * contrast + 128;
     g = (g - 128) * contrast + 128;
     b = (b - 128) * contrast + 128;
 
-    // Vibrance: boost more on muted colors, protect warm tones (skin)
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const sat = (max - min) / 255;            // 0–1 saturation
-    const isSkin = (r > g && r > b) ? 0.5 : 1; // dampen on red-dominant
-    const boost = vibrance * (1 - sat) * isSkin;
-    const gray = 0.2989 * r + 0.5870 * g + 0.1140 * b;
-    r = gray + (r - gray) * (1 + boost);
-    g = gray + (g - gray) * (1 + boost);
-    b = gray + (b - gray) * (1 + boost);
+    // 5. Vibrance (with skin protection on red-dominant pixels)
+    if (vibrance > 0) {
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const sat = (max - min) / 255;
+      const skin = (r > g && r > b) ? skinProtect : 1;
+      const boost = vibrance * (1 - sat) * skin;
+      const gray = 0.2989 * r + 0.5870 * g + 0.1140 * b;
+      r = gray + (r - gray) * (1 + boost);
+      g = gray + (g - gray) * (1 + boost);
+      b = gray + (b - gray) * (1 + boost);
+    }
 
-    // Soft highlight compression
+    // 6. Vintage fade — mix with a cream color
+    if (fade > 0) {
+      r = r * (1 - fade) + fadeR * fade;
+      g = g * (1 - fade) + fadeG * fade;
+      b = b * (1 - fade) + fadeB * fade;
+    }
+
+    // 7. Black & white
+    if (grayscale) {
+      const v = 0.2989 * r + 0.5870 * g + 0.1140 * b;
+      r = g = b = v;
+    }
+
+    // 8. Highlight roll-off
     if (r > 235) r = 235 + (r - 235) * highlightP;
     if (g > 235) g = 235 + (g - 235) * highlightP;
     if (b > 235) b = 235 + (b - 235) * highlightP;
@@ -456,11 +539,13 @@ enhanceBtn.addEventListener('click', async () => {
       dstCanvas = await upscaleWithPica(srcCanvas);
     }
 
+    const preset = PRESETS[currentPreset] || PRESETS.natural;
+
     showProgress(85, 'Dando profundidad a los detalles…');
-    applyLocalContrast(dstCanvas, 0.55, 14);
+    applyLocalContrast(dstCanvas, preset.clarity.amount, preset.clarity.radius);
 
     showProgress(92, 'Ajustando color y contraste…');
-    applyTonalBoost(dstCanvas);
+    applyTonalBoost(dstCanvas, preset.grade);
 
     showProgress(97, 'Guardando resultado…');
     const outType = currentFile?.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
@@ -472,8 +557,10 @@ enhanceBtn.addEventListener('click', async () => {
     hideProgress();
 
     const gainX = (dstCanvas.width * dstCanvas.height) / (srcCanvas.width * srcCanvas.height);
+    const presetLabel = (presetsEl.querySelector('.preset-btn.is-active')?.textContent || '').trim();
     resInfo.innerHTML =
-      (usedAI ? '<span class="ai-badge">✨ Mejorado con IA</span>' : '') +
+      (usedAI ? '<span class="ai-badge">✨ IA</span>' : '') +
+      (presetLabel ? `<span class="preset-tag">${presetLabel}</span>` : '') +
       `${srcCanvas.width}×${srcCanvas.height} ` +
       `<span class="arrow">→</span> ` +
       `${dstCanvas.width}×${dstCanvas.height}` +
@@ -503,6 +590,9 @@ async function showResult(beforeSrc, afterSrc) {
 
   syncBeforeSize();
   setSlider(50);
+
+  // Reveal Share only when the platform actually supports it.
+  shareBtn.classList.toggle('hidden', shareBtn.dataset.supported !== '1');
 
   resultCard.classList.remove('hidden');
   resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -573,23 +663,48 @@ handle.addEventListener('keydown', (e) => {
   if (e.key === 'End') { setSlider(100); e.preventDefault(); }
 });
 
+// ===== Preset selector =====
+presetsEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('.preset-btn');
+  if (!btn) return;
+  const preset = btn.dataset.preset;
+  if (!preset || !PRESETS[preset]) return;
+
+  currentPreset = preset;
+  presetsEl.querySelectorAll('.preset-btn').forEach((b) => {
+    const active = b === btn;
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+});
+
 // ===== Result actions =====
 newBtn.addEventListener('click', () => {
   resetFile();
   document.querySelector('.upload-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
+async function getResultBlob() {
+  if (!resultUrl) return null;
+  const res = await fetch(resultUrl);
+  if (!res.ok) throw new Error('No se pudo leer el resultado.');
+  return res.blob();
+}
+
+function resultFileName(ext) {
+  const base = (currentFile?.name || 'imagen').replace(/\.[^.]+$/, '');
+  return `${base}-mejorada.${ext}`;
+}
+
 downloadBtn.addEventListener('click', async () => {
   if (!resultUrl) return;
   try {
-    const res = await fetch(resultUrl);
-    if (!res.ok) throw new Error('No se pudo descargar.');
-    const blob = await res.blob();
+    const blob = await getResultBlob();
     const url = URL.createObjectURL(blob);
+    const ext = blob.type === 'image/jpeg' ? 'jpg' : 'png';
     const a = document.createElement('a');
-    const base = (currentFile?.name || 'imagen').replace(/\.[^.]+$/, '');
     a.href = url;
-    a.download = `${base}-mejorada.png`;
+    a.download = resultFileName(ext);
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -598,3 +713,36 @@ downloadBtn.addEventListener('click', async () => {
     showError(err.message || 'No se pudo descargar la imagen.');
   }
 });
+
+// Web Share API — opens the native share sheet on mobile (WhatsApp, IG, etc.)
+shareBtn.addEventListener('click', async () => {
+  if (!resultUrl) return;
+  try {
+    const blob = await getResultBlob();
+    const ext = blob.type === 'image/jpeg' ? 'jpg' : 'png';
+    const file = new File([blob], resultFileName(ext), { type: blob.type });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: 'Foto mejorada con PixelBoost',
+        text: 'Mejoré esta foto con PixelBoost ✨',
+      });
+    } else {
+      throw new Error('Tu navegador no soporta compartir archivos. Usa Descargar.');
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return; // user closed the sheet
+    showError(err.message || 'No se pudo compartir.');
+  }
+});
+
+// Show the Share button only on devices that support sharing files.
+(function setupShareVisibility() {
+  try {
+    const probe = new File([''], 'p.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [probe] })) {
+      shareBtn.dataset.supported = '1';
+    }
+  } catch { /* unsupported — leave hidden */ }
+})();

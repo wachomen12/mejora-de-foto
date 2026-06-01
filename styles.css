@@ -318,8 +318,58 @@ button { font-family: inherit; cursor: pointer; }
   background: var(--surface-2);
 }
 
-.actions {
+.presets {
   margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+.preset-btn {
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--t);
+  -webkit-user-select: none;
+  user-select: none;
+  white-space: nowrap;
+}
+.preset-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.preset-btn.is-active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 6px 18px -6px rgba(139, 92, 246, 0.55);
+}
+
+@media (max-width: 540px) {
+  .presets {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    justify-content: flex-start;
+    padding: 4px 2px 8px;
+    margin-left: -8px;
+    margin-right: -8px;
+    padding-left: 8px;
+    padding-right: 8px;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-snap-type: x proximity;
+  }
+  .presets::-webkit-scrollbar { display: none; }
+  .preset-btn { scroll-snap-align: start; flex-shrink: 0; }
+}
+
+.actions {
+  margin-top: 18px;
   display: flex;
   justify-content: center;
 }
@@ -437,7 +487,7 @@ button { font-family: inherit; cursor: pointer; }
 .res-chip .gain  { color: var(--accent-hot); font-weight: 600; margin-left: 6px; }
 .res-chip .ai-badge {
   display: inline-block;
-  margin-right: 10px;
+  margin-right: 8px;
   padding: 3px 9px;
   border-radius: 999px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -446,6 +496,17 @@ button { font-family: inherit; cursor: pointer; }
   font-weight: 700;
   letter-spacing: 0.02em;
   box-shadow: 0 4px 14px -4px rgba(139, 92, 246, 0.55);
+}
+.res-chip .preset-tag {
+  display: inline-block;
+  margin-right: 10px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .compare {
