@@ -33,6 +33,7 @@ const newBtn       = $('newBtn');
 const downloadBtn  = $('downloadBtn');
 const yearEl       = $('year');
 const topLink      = $('topLink');
+const resInfo      = $('resInfo');
 
 let currentFile = null;
 let currentDataUrl = null;
@@ -122,6 +123,7 @@ function resetFile() {
   dzEmpty.classList.remove('hidden');
   enhanceBtn.disabled = true;
   resultCard.classList.add('hidden');
+  resInfo.classList.add('hidden');
   hideProgress();
   hideError();
 }
@@ -210,6 +212,52 @@ function imageToCanvas(img) {
   return c;
 }
 
+// Punchy "Instagram-like" pass: contrast, saturation, shadow lift, slight warmth.
+// Applied per-pixel directly on the canvas after Pica resizes.
+function applyTonalBoost(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = img.data;
+
+  const contrast    = 1.15;   // +15%
+  const saturation  = 1.22;   // +22%
+  const shadowLift  = 10;     // up to +10 on dark pixels
+  const highlightP  = 0.96;   // gentle highlight roll-off
+
+  for (let i = 0; i < d.length; i += 4) {
+    let r = d[i], g = d[i + 1], b = d[i + 2];
+
+    // Shadow lift — only meaningful on darker pixels
+    const lum = 0.2989 * r + 0.5870 * g + 0.1140 * b;
+    if (lum < 90) {
+      const lift = (1 - lum / 90) * shadowLift;
+      r += lift; g += lift; b += lift;
+    }
+
+    // Contrast around 128
+    r = (r - 128) * contrast + 128;
+    g = (g - 128) * contrast + 128;
+    b = (b - 128) * contrast + 128;
+
+    // Saturation around luminance
+    const gray = 0.2989 * r + 0.5870 * g + 0.1140 * b;
+    r = gray + (r - gray) * saturation;
+    g = gray + (g - gray) * saturation;
+    b = gray + (b - gray) * saturation;
+
+    // Soft highlight compression so it doesn't blow out
+    if (r > 235) r = 235 + (r - 235) * highlightP;
+    if (g > 235) g = 235 + (g - 235) * highlightP;
+    if (b > 235) b = 235 + (b - 235) * highlightP;
+
+    d[i]     = r < 0 ? 0 : r > 255 ? 255 : r;
+    d[i + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
+    d[i + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+  }
+
+  ctx.putImageData(img, 0, 0);
+}
+
 async function canvasToDataUrl(canvas, type, quality) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -247,15 +295,18 @@ enhanceBtn.addEventListener('click', async () => {
     animateProgressTo(85, 'Mejorando nitidez y resolución…');
 
     await picaEngine.resize(srcCanvas, dstCanvas, {
-      quality: 3,            // Lanczos, highest quality
+      quality: 3,
       alpha: true,
-      unsharpAmount: 90,     // 0–500: how strong the sharpening is
-      unsharpRadius: 0.6,    // 0.5–2.0: size of the sharpening kernel
-      unsharpThreshold: 2,   // 0–100: avoids sharpening flat areas (denoise-like)
+      unsharpAmount: 180,    // aggressive sharpening (0–500)
+      unsharpRadius: 0.9,    // broader kernel → more visible edges
+      unsharpThreshold: 1,   // sharpen almost everything
     });
 
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    showProgress(95, 'Guardando resultado…');
+    showProgress(90, 'Ajustando color y contraste…');
+    applyTonalBoost(dstCanvas);
+
+    showProgress(96, 'Guardando resultado…');
 
     const outType = currentFile?.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
     const outQuality = outType === 'image/jpeg' ? 0.95 : undefined;
@@ -264,6 +315,14 @@ enhanceBtn.addEventListener('click', async () => {
     showProgress(100, '¡Listo!');
     await wait(300);
     hideProgress();
+
+    const gainX = (dstCanvas.width * dstCanvas.height) / (srcCanvas.width * srcCanvas.height);
+    resInfo.innerHTML =
+      `${srcCanvas.width}×${srcCanvas.height} ` +
+      `<span class="arrow">→</span> ` +
+      `${dstCanvas.width}×${dstCanvas.height}` +
+      `<span class="gain">${gainX.toFixed(1)}× píxeles</span>`;
+    resInfo.classList.remove('hidden');
 
     await showResult(currentDataUrl, resultUrl);
   } catch (err) {
