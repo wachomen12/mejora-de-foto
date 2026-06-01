@@ -212,40 +212,78 @@ function imageToCanvas(img) {
   return c;
 }
 
-// Punchy "Instagram-like" pass: contrast, saturation, shadow lift, slight warmth.
-// Applied per-pixel directly on the canvas after Pica resizes.
+// "Clarity" / local contrast: large-radius unsharp mask. Makes details pop
+// (skin texture, edges, fabric) without affecting global exposure.
+// This is the single biggest factor in making photos look "iPhone-like".
+function applyLocalContrast(canvas, amount = 0.55, radius = 14) {
+  const w = canvas.width, h = canvas.height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const blurCanvas = document.createElement('canvas');
+  blurCanvas.width = w;
+  blurCanvas.height = h;
+  const bctx = blurCanvas.getContext('2d');
+  bctx.filter = `blur(${radius}px)`;
+  bctx.drawImage(canvas, 0, 0);
+
+  const orig = ctx.getImageData(0, 0, w, h);
+  const blur = bctx.getImageData(0, 0, w, h);
+  const od = orig.data, bd = blur.data;
+
+  for (let i = 0; i < od.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const v = od[i + c] + amount * (od[i + c] - bd[i + c]);
+      od[i + c] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
+  ctx.putImageData(orig, 0, 0);
+}
+
+// Tonal + color grading pass: contrast, vibrance (skin-aware saturation),
+// shadow lift, warm white-balance shift. Inspired by phone-camera ISPs.
 function applyTonalBoost(canvas) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = img.data;
 
-  const contrast    = 1.15;   // +15%
-  const saturation  = 1.22;   // +22%
-  const shadowLift  = 10;     // up to +10 on dark pixels
-  const highlightP  = 0.96;   // gentle highlight roll-off
+  const contrast   = 1.18;   // +18%
+  const vibrance   = 0.45;   // 0–1, boosts unsaturated pixels more
+  const shadowLift = 14;     // up to +14 on the darkest pixels
+  const highlightP = 0.94;   // soft roll-off above 235
+  const warmR      = 1.025;  // +2.5% red
+  const warmB      = 0.985;  // -1.5% blue
 
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
 
-    // Shadow lift — only meaningful on darker pixels
+    // Shadow lift on dark pixels
     const lum = 0.2989 * r + 0.5870 * g + 0.1140 * b;
-    if (lum < 90) {
-      const lift = (1 - lum / 90) * shadowLift;
+    if (lum < 100) {
+      const lift = (1 - lum / 100) * shadowLift;
       r += lift; g += lift; b += lift;
     }
+
+    // Warm white-balance shift (Apple-ish)
+    r *= warmR;
+    b *= warmB;
 
     // Contrast around 128
     r = (r - 128) * contrast + 128;
     g = (g - 128) * contrast + 128;
     b = (b - 128) * contrast + 128;
 
-    // Saturation around luminance
+    // Vibrance: boost more on muted colors, protect warm tones (skin)
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const sat = (max - min) / 255;            // 0–1 saturation
+    const isSkin = (r > g && r > b) ? 0.5 : 1; // dampen on red-dominant
+    const boost = vibrance * (1 - sat) * isSkin;
     const gray = 0.2989 * r + 0.5870 * g + 0.1140 * b;
-    r = gray + (r - gray) * saturation;
-    g = gray + (g - gray) * saturation;
-    b = gray + (b - gray) * saturation;
+    r = gray + (r - gray) * (1 + boost);
+    g = gray + (g - gray) * (1 + boost);
+    b = gray + (b - gray) * (1 + boost);
 
-    // Soft highlight compression so it doesn't blow out
+    // Soft highlight compression
     if (r > 235) r = 235 + (r - 235) * highlightP;
     if (g > 235) g = 235 + (g - 235) * highlightP;
     if (b > 235) b = 235 + (b - 235) * highlightP;
@@ -303,10 +341,13 @@ enhanceBtn.addEventListener('click', async () => {
     });
 
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    showProgress(90, 'Ajustando color y contraste…');
+    showProgress(86, 'Dando profundidad a los detalles…');
+    applyLocalContrast(dstCanvas, 0.55, 14);
+
+    showProgress(92, 'Ajustando color y contraste…');
     applyTonalBoost(dstCanvas);
 
-    showProgress(96, 'Guardando resultado…');
+    showProgress(97, 'Guardando resultado…');
 
     const outType = currentFile?.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
     const outQuality = outType === 'image/jpeg' ? 0.95 : undefined;
