@@ -532,16 +532,22 @@ button { font-family: inherit; cursor: pointer; }
 .compare-clip {
   position: absolute;
   inset: 0;
-  width: 50%;
-  overflow: hidden;
+  width: 100%;
   z-index: 2;
+  /* clip-path is GPU-accelerated on every modern browser, so dragging
+     the slider is essentially free regardless of the photo's resolution. */
+  -webkit-clip-path: inset(0 50% 0 0);
+  clip-path: inset(0 50% 0 0);
+  will-change: clip-path;
 }
 .compare-clip .compare-img.before {
-  width: 100vw;
-  max-width: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
   height: 100%;
   object-fit: cover;
-  /* dynamic via JS — we'll match dimensions below */
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 .compare-handle {
   position: absolute;

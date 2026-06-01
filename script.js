@@ -462,6 +462,30 @@ async function canvasToDataUrl(canvas, type, quality) {
   });
 }
 
+// Build a smaller "preview pair" for the before/after slider so dragging
+// stays buttery even when the real result is 24 MP. The full-resolution
+// result stays in resultUrl for the Download button.
+async function buildSliderPreviews(srcCanvas, dstCanvas, maxWidth = 1600) {
+  const targetW = Math.min(dstCanvas.width, maxWidth);
+  const targetH = Math.round(targetW * (dstCanvas.height / dstCanvas.width));
+
+  const beforeC = document.createElement('canvas');
+  beforeC.width = targetW;
+  beforeC.height = targetH;
+  beforeC.getContext('2d').drawImage(srcCanvas, 0, 0, targetW, targetH);
+
+  const afterC = document.createElement('canvas');
+  afterC.width = targetW;
+  afterC.height = targetH;
+  afterC.getContext('2d').drawImage(dstCanvas, 0, 0, targetW, targetH);
+
+  const [beforeUrl, afterUrl] = await Promise.all([
+    canvasToDataUrl(beforeC, 'image/jpeg', 0.9),
+    canvasToDataUrl(afterC,  'image/jpeg', 0.9),
+  ]);
+  return { beforeUrl, afterUrl };
+}
+
 // ===== Enhance flow =====
 async function upscaleWithAI(srcCanvas) {
   // Cap input at 1 MP so phones don't OOM on a 4x model.
@@ -547,10 +571,17 @@ enhanceBtn.addEventListener('click', async () => {
     showProgress(92, 'Ajustando color y contraste…');
     applyTonalBoost(dstCanvas, preset.grade);
 
-    showProgress(97, 'Guardando resultado…');
+    showProgress(96, 'Guardando resultado…');
     const outType = currentFile?.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
     const outQuality = outType === 'image/jpeg' ? 0.95 : undefined;
-    resultUrl = await canvasToDataUrl(dstCanvas, outType, outQuality);
+
+    // Full-quality result for the Download/Share buttons, and matched-size
+    // previews for the comparison slider (both in parallel).
+    const [fullUrl, previews] = await Promise.all([
+      canvasToDataUrl(dstCanvas, outType, outQuality),
+      buildSliderPreviews(srcCanvas, dstCanvas, 1600),
+    ]);
+    resultUrl = fullUrl;
 
     showProgress(100, '¡Listo!');
     await wait(300);
@@ -567,7 +598,7 @@ enhanceBtn.addEventListener('click', async () => {
       `<span class="gain">${gainX.toFixed(1)}× píxeles</span>`;
     resInfo.classList.remove('hidden');
 
-    await showResult(currentDataUrl, resultUrl);
+    await showResult(previews.beforeUrl, previews.afterUrl);
   } catch (err) {
     console.error(err);
     hideProgress();
@@ -583,15 +614,15 @@ async function showResult(beforeSrc, afterSrc) {
   beforeImg.src = beforeSrc;
   afterImg.src = afterSrc;
 
+  // decode() waits until the image is *ready to paint* — not just downloaded.
+  // This avoids the first slider drag stuttering while the browser decodes.
   await Promise.all([
-    waitForImage(beforeImg),
-    waitForImage(afterImg),
+    beforeImg.decode().catch(() => waitForImage(beforeImg)),
+    afterImg.decode().catch(() => waitForImage(afterImg)),
   ]);
 
-  syncBeforeSize();
   setSlider(50);
 
-  // Reveal Share only when the platform actually supports it.
   shareBtn.classList.toggle('hidden', shareBtn.dataset.supported !== '1');
 
   resultCard.classList.remove('hidden');
@@ -606,20 +637,13 @@ function waitForImage(img) {
   });
 }
 
-function syncBeforeSize() {
-  const rect = afterImg.getBoundingClientRect();
-  beforeImg.style.width = `${rect.width}px`;
-  beforeImg.style.height = `${rect.height}px`;
-  beforeImg.style.objectFit = 'cover';
-}
-
-window.addEventListener('resize', () => {
-  if (!resultCard.classList.contains('hidden')) syncBeforeSize();
-});
-
 function setSlider(pct) {
   pct = Math.max(0, Math.min(100, pct));
-  clip.style.width = `${pct}%`;
+  const right = 100 - pct;
+  // clip-path on a fixed-size overlay → GPU compositor moves it. No layout,
+  // no repaint of the underlying image, no jank even on 6000px photos.
+  clip.style.clipPath = `inset(0 ${right}% 0 0)`;
+  clip.style.webkitClipPath = `inset(0 ${right}% 0 0)`;
   handle.style.left = `${pct}%`;
   handle.setAttribute('aria-valuenow', String(Math.round(pct)));
 }
