@@ -435,6 +435,18 @@ button { font-family: inherit; cursor: pointer; }
 }
 .res-chip .arrow { color: var(--accent-hot); margin: 0 6px; }
 .res-chip .gain  { color: var(--accent-hot); font-weight: 600; margin-left: 6px; }
+.res-chip .ai-badge {
+  display: inline-block;
+  margin-right: 10px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 14px -4px rgba(139, 92, 246, 0.55);
+}
 
 .compare {
   position: relative;

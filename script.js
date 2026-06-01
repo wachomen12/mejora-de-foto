@@ -40,6 +40,9 @@ let currentDataUrl = null;
 let resultUrl = null;
 let picaInstance = null;
 let progressTimer = null;
+let aiUpscaler = null;
+let aiLoadPromise = null;
+let aiTriedAndFailed = false;
 
 yearEl.textContent = new Date().getFullYear();
 
@@ -176,6 +179,74 @@ function wait(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// ===== Real AI (UpscalerJS + ESRGAN, lazy-loaded) =====
+// First call downloads TF.js + UpscalerJS + ESRGAN model (~25 MB) via esm.sh.
+// Browser caches it after the first run, so later uses are instant to start.
+// If anything fails (slow network, low-memory device, esm.sh down), the
+// caller catches the rejection and falls back to the Pica path.
+async function loadAI() {
+  if (aiUpscaler) return aiUpscaler;
+  if (aiTriedAndFailed) throw new Error('La IA no está disponible.');
+  if (aiLoadPromise) return aiLoadPromise;
+
+  aiLoadPromise = (async () => {
+    const tfMod = await import('https://esm.sh/@tensorflow/tfjs@4.10.0');
+    const tf = tfMod.default || tfMod;
+    globalThis.tf = tf;
+
+    const [upMod, modelMod] = await Promise.all([
+      import('https://esm.sh/upscaler@1.0.0-beta.19?deps=@tensorflow/tfjs@4.10.0'),
+      import('https://esm.sh/@upscalerjs/esrgan-slim@1.0.0-beta.19/4x?deps=@tensorflow/tfjs@4.10.0'),
+    ]);
+
+    const Upscaler = upMod.default || upMod.Upscaler || upMod;
+    const model = modelMod.default || modelMod;
+    if (!Upscaler || typeof Upscaler !== 'function') {
+      throw new Error('UpscalerJS no expuso un constructor válido.');
+    }
+
+    aiUpscaler = new Upscaler({ model });
+    return aiUpscaler;
+  })();
+
+  try {
+    return await aiLoadPromise;
+  } catch (err) {
+    aiTriedAndFailed = true;
+    aiLoadPromise = null;
+    throw err;
+  }
+}
+
+// Cap a canvas to a max-pixel budget by downscaling. Prevents OOM on phones
+// when feeding huge inputs to a 4x AI model.
+function limitCanvasSize(canvas, maxPixels) {
+  const pixels = canvas.width * canvas.height;
+  if (pixels <= maxPixels) return canvas;
+  const scale = Math.sqrt(maxPixels / pixels);
+  const out = document.createElement('canvas');
+  out.width  = Math.max(1, Math.floor(canvas.width * scale));
+  out.height = Math.max(1, Math.floor(canvas.height * scale));
+  out.getContext('2d').drawImage(canvas, 0, 0, out.width, out.height);
+  return out;
+}
+
+// Load a base64/PNG data URI back into a canvas.
+async function dataUrlToCanvas(dataUrl) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('No se pudo decodificar el resultado de la IA.'));
+    img.src = dataUrl;
+  });
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c;
+}
+
 // ===== Pica (high-quality image enhancement) =====
 function getPica() {
   if (picaInstance) return picaInstance;
@@ -309,6 +380,42 @@ async function canvasToDataUrl(canvas, type, quality) {
 }
 
 // ===== Enhance flow =====
+async function upscaleWithAI(srcCanvas) {
+  // Cap input at 1 MP so phones don't OOM on a 4x model.
+  const aiInput = limitCanvasSize(srcCanvas, 1_000_000);
+  const upscaler = await loadAI();
+
+  const dataUrl = await upscaler.upscale(aiInput, {
+    output: 'base64',
+    patchSize: 64,
+    padding: 2,
+    progress: (rate) => {
+      const r = Math.max(0, Math.min(1, rate));
+      showProgress(25 + r * 55, 'IA restaurando detalles…');
+    },
+  });
+  return dataUrlToCanvas(dataUrl);
+}
+
+async function upscaleWithPica(srcCanvas) {
+  const picaEngine = getPica();
+  const scale = pickScale(srcCanvas.width, srcCanvas.height);
+  const dst = document.createElement('canvas');
+  dst.width  = Math.round(srcCanvas.width  * scale);
+  dst.height = Math.round(srcCanvas.height * scale);
+
+  animateProgressTo(80, 'Mejorando nitidez y resolución…');
+  await picaEngine.resize(srcCanvas, dst, {
+    quality: 3,
+    alpha: true,
+    unsharpAmount: 180,
+    unsharpRadius: 0.9,
+    unsharpThreshold: 1,
+  });
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+  return dst;
+}
+
 enhanceBtn.addEventListener('click', async () => {
   if (!currentDataUrl) return;
   hideError();
@@ -318,37 +425,44 @@ enhanceBtn.addEventListener('click', async () => {
   enhanceBtn.disabled = true;
 
   try {
-    showProgress(4, 'Preparando imagen…');
-    const picaEngine = getPica();
+    showProgress(3, 'Preparando imagen…');
     await ensureImageReady(previewImg);
-
     const srcCanvas = imageToCanvas(previewImg);
-    const scale = pickScale(srcCanvas.width, srcCanvas.height);
 
-    const dstCanvas = document.createElement('canvas');
-    dstCanvas.width  = Math.round(srcCanvas.width  * scale);
-    dstCanvas.height = Math.round(srcCanvas.height * scale);
+    let dstCanvas;
+    let usedAI = false;
 
-    showProgress(12, 'Mejorando nitidez y resolución…');
-    animateProgressTo(85, 'Mejorando nitidez y resolución…');
+    // Try AI first unless it has already failed this session.
+    if (!aiTriedAndFailed) {
+      try {
+        const firstTime = !aiUpscaler;
+        showProgress(8, firstTime
+          ? 'Cargando IA (solo la primera vez, ~25 MB)…'
+          : 'Iniciando IA…');
+        animateProgressTo(22, 'Cargando IA…');
 
-    await picaEngine.resize(srcCanvas, dstCanvas, {
-      quality: 3,
-      alpha: true,
-      unsharpAmount: 180,    // aggressive sharpening (0–500)
-      unsharpRadius: 0.9,    // broader kernel → more visible edges
-      unsharpThreshold: 1,   // sharpen almost everything
-    });
+        dstCanvas = await upscaleWithAI(srcCanvas);
+        usedAI = true;
+        if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      } catch (aiErr) {
+        console.warn('IA no disponible, usando mejora clásica:', aiErr);
+        if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      }
+    }
 
-    if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    showProgress(86, 'Dando profundidad a los detalles…');
+    // Fallback to Pica if AI didn't produce a result.
+    if (!dstCanvas) {
+      showProgress(15, 'Mejorando nitidez y resolución…');
+      dstCanvas = await upscaleWithPica(srcCanvas);
+    }
+
+    showProgress(85, 'Dando profundidad a los detalles…');
     applyLocalContrast(dstCanvas, 0.55, 14);
 
     showProgress(92, 'Ajustando color y contraste…');
     applyTonalBoost(dstCanvas);
 
     showProgress(97, 'Guardando resultado…');
-
     const outType = currentFile?.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
     const outQuality = outType === 'image/jpeg' ? 0.95 : undefined;
     resultUrl = await canvasToDataUrl(dstCanvas, outType, outQuality);
@@ -359,6 +473,7 @@ enhanceBtn.addEventListener('click', async () => {
 
     const gainX = (dstCanvas.width * dstCanvas.height) / (srcCanvas.width * srcCanvas.height);
     resInfo.innerHTML =
+      (usedAI ? '<span class="ai-badge">✨ Mejorado con IA</span>' : '') +
       `${srcCanvas.width}×${srcCanvas.height} ` +
       `<span class="arrow">→</span> ` +
       `${dstCanvas.width}×${dstCanvas.height}` +
