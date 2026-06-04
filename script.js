@@ -3,7 +3,21 @@
 // running in the visitor's browser. No backend, no API keys, no cost.
 
 const MAX_BYTES = 10 * 1024 * 1024;
-const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp'];
+const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+
+function isHEIC(file) {
+  const type = (file.type || '').toLowerCase();
+  const name = (file.name || '').toLowerCase();
+  return type === 'image/heic' || type === 'image/heif'
+      || name.endsWith('.heic') || name.endsWith('.heif');
+}
+
+function looksLikeImage(file) {
+  if (ACCEPTED.includes(file.type)) return true;
+  if (isHEIC(file)) return true;
+  const name = (file.name || '').toLowerCase();
+  return /\.(jpe?g|png|webp)$/.test(name);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,6 +60,18 @@ let aiUpscaler = null;
 let aiLoadPromise = null;
 let aiTriedAndFailed = false;
 let currentPreset = 'natural';
+
+// Cache of the raw (un-filtered) upscale for the current file.
+// Lets the user switch between presets without re-running AI/Pica.
+let upscaleCache = null; // { file, canvas, usedAI }
+
+function copyCanvas(src) {
+  const out = document.createElement('canvas');
+  out.width = src.width;
+  out.height = src.height;
+  out.getContext('2d').drawImage(src, 0, 0);
+  return out;
+}
 
 // ===== Filter presets =====
 // Each preset configures the post-upscale grading pass.
@@ -145,17 +171,67 @@ removeBtn.addEventListener('click', (e) => {
   resetFile();
 });
 
-function handleFile(file) {
+// Ctrl+V / ⌘+V — accept images straight from the clipboard.
+document.addEventListener('paste', (e) => {
+  // Ignore paste events inside text inputs (none right now, but future-proof).
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type && item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        handleFile(file);
+        return;
+      }
+    }
+  }
+});
+
+async function handleFile(file) {
   hideError();
-  if (!ACCEPTED.includes(file.type)) {
-    showError('Formato no admitido. Usa JPG, PNG o WEBP.');
+  if (!looksLikeImage(file)) {
+    showError('Formato no admitido. Usa JPG, PNG, WEBP o HEIC.');
     return;
   }
   if (file.size > MAX_BYTES) {
     showError(`La imagen pesa ${formatSize(file.size)}. El máximo es 10 MB.`);
     return;
   }
+
+  // iPhone photos come as HEIC by default — convert to JPEG transparently.
+  if (isHEIC(file)) {
+    if (typeof heic2any !== 'function') {
+      showError('No se pudo cargar el conversor HEIC. Revisa tu conexión.');
+      return;
+    }
+    try {
+      showProgress(15, 'Convirtiendo foto de iPhone (HEIC → JPG)…');
+      animateProgressTo(85, 'Convirtiendo foto de iPhone (HEIC → JPG)…');
+      const converted = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 });
+      const blob = Array.isArray(converted) ? converted[0] : converted;
+      file = new File(
+        [blob],
+        file.name.replace(/\.(heic|heif)$/i, '.jpg'),
+        { type: 'image/jpeg' }
+      );
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      showProgress(100, '¡Listo!');
+      await wait(200);
+      hideProgress();
+    } catch (e) {
+      hideProgress();
+      console.error(e);
+      showError('No se pudo convertir el HEIC. Intenta otra imagen.');
+      return;
+    }
+  }
+
   currentFile = file;
+  upscaleCache = null; // any cached upscale belongs to the previous file
   fileNameEl.textContent = file.name;
   fileSizeEl.textContent = formatSize(file.size);
 
@@ -175,6 +251,7 @@ function resetFile() {
   currentFile = null;
   currentDataUrl = null;
   resultUrl = null;
+  upscaleCache = null;
   fileInput.value = '';
   previewImg.src = '';
   dzPreview.classList.add('hidden');
@@ -539,28 +616,43 @@ enhanceBtn.addEventListener('click', async () => {
     let dstCanvas;
     let usedAI = false;
 
-    // Try AI first unless it has already failed this session.
-    if (!aiTriedAndFailed) {
-      try {
-        const firstTime = !aiUpscaler;
-        showProgress(8, firstTime
-          ? 'Cargando IA (solo la primera vez, ~25 MB)…'
-          : 'Iniciando IA…');
-        animateProgressTo(22, 'Cargando IA…');
+    // === Cache hit: same file as last time. Skip the slow upscale step ===
+    if (upscaleCache && upscaleCache.file === currentFile) {
+      showProgress(40, 'Aplicando preset…');
+      dstCanvas = copyCanvas(upscaleCache.canvas);
+      usedAI = upscaleCache.usedAI;
+    } else {
+      // === Cache miss: compute the upscale from scratch ===
+      upscaleCache = null;
 
-        dstCanvas = await upscaleWithAI(srcCanvas);
-        usedAI = true;
-        if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-      } catch (aiErr) {
-        console.warn('IA no disponible, usando mejora clásica:', aiErr);
-        if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      if (!aiTriedAndFailed) {
+        try {
+          const firstTime = !aiUpscaler;
+          showProgress(8, firstTime
+            ? 'Cargando IA (solo la primera vez, ~25 MB)…'
+            : 'Iniciando IA…');
+          animateProgressTo(22, 'Cargando IA…');
+
+          dstCanvas = await upscaleWithAI(srcCanvas);
+          usedAI = true;
+          if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+        } catch (aiErr) {
+          console.warn('IA no disponible, usando mejora clásica:', aiErr);
+          if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+        }
       }
-    }
 
-    // Fallback to Pica if AI didn't produce a result.
-    if (!dstCanvas) {
-      showProgress(15, 'Mejorando nitidez y resolución…');
-      dstCanvas = await upscaleWithPica(srcCanvas);
+      if (!dstCanvas) {
+        showProgress(15, 'Mejorando nitidez y resolución…');
+        dstCanvas = await upscaleWithPica(srcCanvas);
+      }
+
+      // Save a clean copy so future preset swaps reuse this work.
+      upscaleCache = {
+        file: currentFile,
+        canvas: copyCanvas(dstCanvas),
+        usedAI,
+      };
     }
 
     const preset = PRESETS[currentPreset] || PRESETS.natural;
