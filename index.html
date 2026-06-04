@@ -47,7 +47,7 @@
 
     <section class="card upload-card" id="uploadCard">
       <div class="dropzone" id="dropzone" aria-label="Zona para subir imagen">
-        <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden />
+        <input type="file" id="fileInput" accept="image/*,.heic,.heif" hidden />
 
         <div class="dropzone-state" id="dzEmpty">
           <div class="dz-icon" aria-hidden="true">
@@ -60,7 +60,7 @@
           <h3 class="dz-title">Arrastra una imagen aquí</h3>
           <p class="dz-text">o haz clic para seleccionar desde tu dispositivo</p>
           <button class="btn btn-secondary" type="button" id="browseBtn">Elegir archivo</button>
-          <p class="dz-hint">JPG, PNG o WEBP · Máximo 10 MB</p>
+          <p class="dz-hint">JPG, PNG, WEBP o HEIC · Máx. 10 MB · <kbd>Ctrl</kbd>+<kbd>V</kbd> para pegar</p>
         </div>
 
         <div class="dropzone-state hidden" id="dzPreview">
@@ -185,6 +185,7 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/pica@9.0.1/dist/pica.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
